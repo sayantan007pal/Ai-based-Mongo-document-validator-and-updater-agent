@@ -6,8 +6,8 @@ This guide will help you set up the Coding Question Validator system from scratc
 
 - [ ] Node.js v18+ installed
 - [ ] MongoDB running (with replica set)
-- [ ] Redis server running
-- [ ] Anthropic API key obtained
+- [ ] AWS SQS queue created (or LocalStack running)
+- [ ] OpenAI API key obtained
 
 ## Step-by-Step Setup
 
@@ -41,23 +41,34 @@ replication:
   replSetName: rs0
 ```
 
-### 3. Start Redis
+### 3. Start LocalStack (for development) or Configure AWS SQS
 
+**For Local Development:**
 ```bash
-# macOS (Homebrew)
-brew services start redis
+# Start LocalStack
+docker run -d -p 4566:4566 localstack/localstack
 
-# Ubuntu/Debian
-sudo systemctl start redis
-
-# Or run directly
-redis-server
+# Create SQS queue
+aws --endpoint-url=https://localhost.localstack.cloud:4566 sqs create-queue \
+  --queue-name coding_question_updater_queue \
+  --region ap-south-1
 ```
 
-Verify Redis is running:
+**For Production:**
 ```bash
-redis-cli ping
-# Should return: PONG
+# Create SQS queue in AWS
+aws sqs create-queue --queue-name coding_question_updater_queue --region ap-south-1
+
+# Note the queue URL for .env file
+```
+
+Verify queue exists:
+```bash
+# LocalStack
+aws --endpoint-url=https://localhost.localstack.cloud:4566 sqs list-queues --region ap-south-1
+
+# AWS
+aws sqs list-queues --region ap-south-1
 ```
 
 ### 4. Configure Environment
@@ -72,7 +83,8 @@ nano .env  # or vim, code, etc.
 
 **Required changes in .env:**
 - `MONGODB_URI` - Your MongoDB connection string
-- `ANTHROPIC_API_KEY` - Your Claude API key
+- `OPENAI_API_KEY` - Your OpenAI API key
+- `SQS_QUEUE_URL` - Your SQS queue URL (LocalStack or AWS)
 
 ### 5. Build TypeScript
 
@@ -171,16 +183,20 @@ mongosh --eval "rs.initiate()"
 
 **Check:**
 ```bash
-redis-cli ping
+# Check LocalStack is running
+docker ps | grep localstack
+
+# Or check AWS SQS is accessible
+aws sqs list-queues --region ap-south-1
 ```
 
 **Fix:**
 ```bash
-# Start Redis
-redis-server
+# Start LocalStack if needed
+docker run -d -p 4566:4566 localstack/localstack
 
-# Or on macOS
-brew services start redis
+# Or configure AWS credentials
+aws configure
 ```
 
 ### Issue: "Invalid API key"
@@ -188,13 +204,13 @@ brew services start redis
 **Check:**
 - API key is correctly set in `.env`
 - No extra spaces or quotes around the key
-- Key starts with `sk-ant-`
+- Key starts with `sk-proj-` (OpenAI)
 
 **Fix:**
 ```bash
 # Verify .env file
-cat .env | grep ANTHROPIC_API_KEY
-# Should show: ANTHROPIC_API_KEY=sk-ant-xxxxx (no quotes)
+cat .env | grep OPENAI_API_KEY
+# Should show: OPENAI_API_KEY=sk-proj-xxxxx (no quotes)
 ```
 
 ### Issue: "Collection is empty"
@@ -308,16 +324,17 @@ QUEUE_CONCURRENCY=10
 
 ### Rate Limiting Considerations
 
-Claude API rate limits (as of 2024):
-- Free tier: ~5 requests/minute
-- Paid tier: Variable based on plan
+OpenAI API rate limits (varies by plan):
+- Free tier: Limited requests/day
+- Pay-as-you-go: Variable based on usage and tier
+- Check https://platform.openai.com/account/rate-limits
 
 Adjust concurrency accordingly:
 ```env
-# For free tier
+# For lower tier
 QUEUE_CONCURRENCY=2
 
-# For paid tier
+# For higher tier
 QUEUE_CONCURRENCY=10
 ```
 
@@ -334,13 +351,20 @@ Use tools like:
 
 Monitor queue metrics:
 ```bash
-# Create monitoring script
+# Create monitoring script for SQS
 cat > monitor-queue.sh << 'EOF'
 #!/bin/bash
+QUEUE_URL="your-queue-url-here"
+ENDPOINT="--endpoint-url=https://localhost.localstack.cloud:4566"  # Remove for AWS
+
 while true; do
-  redis-cli LLEN bull:question-validation-queue:waiting
-  redis-cli LLEN bull:question-validation-queue:active
-  redis-cli LLEN bull:question-validation-queue:failed
+  echo "=== SQS Queue Stats ==="
+  aws $ENDPOINT sqs get-queue-attributes \
+    --queue-url $QUEUE_URL \
+    --attribute-names All \
+    --region ap-south-1 \
+    --query 'Attributes.[ApproximateNumberOfMessages,ApproximateNumberOfMessagesNotVisible]' \
+    --output text
   sleep 10
 done
 EOF
@@ -368,13 +392,23 @@ async function healthCheck() {
   const mongoOk = await mongo.healthCheck();
   await mongo.disconnect();
 
-  // Check Redis
-  const redis = new IORedis(config.queue.redis);
-  const redisOk = (await redis.ping()) === 'PONG';
-  await redis.quit();
+  // Check SQS
+  const { SQSClient, GetQueueAttributesCommand } = require('@aws-sdk/client-sqs');
+  const sqsClient = new SQSClient({ 
+    region: config.queue.region,
+    endpoint: config.queue.endpoint 
+  });
+  try {
+    await sqsClient.send(new GetQueueAttributesCommand({ 
+      QueueUrl: config.queue.queueUrl 
+    }));
+    var sqsOk = true;
+  } catch {
+    var sqsOk = false;
+  }
 
-  console.log({ mongodb: mongoOk, redis: redisOk });
-  process.exit(mongoOk && redisOk ? 0 : 1);
+  console.log({ mongodb: mongoOk, sqs: sqsOk });
+  process.exit(mongoOk && sqsOk ? 0 : 1);
 }
 
 healthCheck();
@@ -396,10 +430,11 @@ healthCheck();
    - Use least-privilege users
    - Enable TLS/SSL
 
-4. **Redis**
-   - Enable password protection
-   - Bind to localhost only (if not using distributed setup)
-   - Use TLS for remote connections
+4. **AWS SQS**
+   - Use IAM roles for authentication
+   - Enable encryption at rest
+   - Use VPC endpoints for private access
+   - Monitor queue metrics
 
 ## Backup Strategy
 
@@ -462,13 +497,17 @@ npm run consumer
 tail -f logs/combined.log
 
 # Check queue
-redis-cli LLEN bull:question-validation-queue:waiting
+aws sqs get-queue-attributes \
+  --queue-url $SQS_QUEUE_URL \
+  --attribute-names All \
+  --region ap-south-1
 
 # Check MongoDB
 mongosh --eval "use recruitment; db.coding_questions.countDocuments()"
 
-# Clean queue
-redis-cli FLUSHDB
+# Clean queue (for LocalStack)
+aws --endpoint-url=https://localhost.localstack.cloud:4566 sqs purge-queue \
+  --queue-url $SQS_QUEUE_URL --region ap-south-1
 
 # Remove old logs
 rm logs/*.log

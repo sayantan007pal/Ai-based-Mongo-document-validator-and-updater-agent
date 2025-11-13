@@ -13,8 +13,8 @@ The Coding Question Validator is a robust, production-ready system designed to v
 **Components**:
 - `index.ts` - Main config loader and validator
 - `mongodb.config.ts` - MongoDB connection settings
-- `queue.config.ts` - Redis/BullMQ settings
-- `ai.config.ts` - AI service settings
+- `queue.config.ts` - AWS SQS settings
+- `ai.config.ts` - OpenAI API settings
 
 **Design Principles**:
 - Environment-based configuration
@@ -84,29 +84,38 @@ Document → validateWithZod() → performCustomValidations() → ValidationResu
 - Transaction support ready
 
 #### QueueService
-- **Responsibility**: Job queue management using BullMQ
+- **Responsibility**: Job queue management using AWS SQS
 - **Key Methods**:
-  - `addJob()` - Queue document for processing
-  - `createWorker()` - Process jobs
-  - `getStats()` - Monitor queue
+  - `sendMessage()` - Queue document for processing
+  - `receiveMessages()` - Poll messages from queue
+  - `deleteMessage()` - Remove processed message
+  - `getStats()` - Monitor queue metrics
 
 **Features**:
-- Automatic retries with exponential backoff
-- Job persistence
-- Event-based monitoring
-- Concurrency control
+- Long polling for efficiency
+- Visibility timeout management
+- Message persistence
+- Configurable concurrency
+- Supports LocalStack for development
 
 #### AIProcessorService
-- **Responsibility**: AI-powered document correction
+- **Responsibility**: AI-powered document correction using OpenAI
 - **Key Methods**:
-  - `correctDocument()` - Send to Claude API
+  - `correctDocument()` - Send to OpenAI GPT API
   - `testConnection()` - Verify API access
+  - `processBatch()` - Process multiple documents efficiently
 
 **Process**:
 1. Generate correction prompt
-2. Call Claude API
+2. Call OpenAI Chat Completions API
 3. Parse JSON response
 4. Preserve critical fields (_id, question_id)
+
+**Features**:
+- Support for multiple GPT models
+- Streaming response handling
+- Token usage tracking
+- Structured output parsing
 
 #### UpdaterService
 - **Responsibility**: Safe document updates
@@ -266,9 +275,9 @@ Document → validateWithZod() → performCustomValidations() → ValidationResu
 │                       │                                     │
 │                       ▼                                     │
 │    ┌──────────────────────────────────────────────┐       │
-│    │ 6. Call AI Processor                         │       │
+│    │ 6. Call AI Processor (OpenAI)                │       │
 │    │    - Generate prompt with errors             │       │
-│    │    - Call Claude API                         │       │
+│    │    - Call GPT API                            │       │
 │    │    - Parse JSON response                     │       │
 │    └──────────────────┬───────────────────────────┘       │
 │                       │                                     │

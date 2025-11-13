@@ -2,7 +2,7 @@
 
 ## Executive Summary
 
-A complete, production-ready MongoDB schema validation and auto-correction system built with Node.js, TypeScript, and Claude AI. The system automatically scans documents, validates them against a strict schema, backs up invalid documents, and uses AI to intelligently correct and update them—all while ensuring no duplicate documents are ever created.
+A complete, production-ready MongoDB schema validation and auto-correction system built with Node.js, TypeScript, and OpenAI GPT. The system automatically scans documents, validates them against a strict schema, backs up invalid documents, and uses AI to intelligently correct and update them—all while ensuring no duplicate documents are ever created.
 
 ## What Has Been Built
 
@@ -68,7 +68,7 @@ interface CodingQuestion {
 
 ### 2. AI-Powered Correction
 
-Uses Claude API (claude-3-5-sonnet-20241022) to intelligently fix documents:
+Uses OpenAI GPT API to intelligently fix documents:
 
 **Correction Process**:
 1. Generate detailed prompt with:
@@ -76,7 +76,7 @@ Uses Claude API (claude-3-5-sonnet-20241022) to intelligently fix documents:
    - Complete schema definition
    - Original document
    - Format requirements
-2. Call Claude API
+2. Call OpenAI Chat Completions API
 3. Parse JSON response
 4. Validate AI-corrected document
 5. Update if valid, retry if invalid
@@ -89,13 +89,14 @@ Uses Claude API (claude-3-5-sonnet-20241022) to intelligently fix documents:
 
 ### 3. Queue-Based Processing
 
-Uses BullMQ (Redis-backed) for reliable job processing:
+Uses AWS SQS for reliable job processing:
 
 **Features**:
-- Automatic retries with exponential backoff
-- Configurable concurrency
-- Job persistence
-- Failed job tracking
+- Message persistence and durability
+- Configurable visibility timeout
+- Long polling for efficiency
+- Dead-letter queue support (optional)
+- Message retention up to 14 days
 - Real-time statistics
 
 **Configuration**:
@@ -103,6 +104,8 @@ Uses BullMQ (Redis-backed) for reliable job processing:
 QUEUE_CONCURRENCY=5      # Process 5 jobs simultaneously
 RETRY_MAX_ATTEMPTS=3     # Retry failed jobs 3 times
 RETRY_DELAY_MS=5000      # 5s, 10s, 20s backoff
+SQS_VISIBILITY_TIMEOUT=300  # 5 minutes
+SQS_WAIT_TIME_SECONDS=20    # Long polling
 ```
 
 ### 4. Comprehensive Backup System
@@ -211,11 +214,10 @@ coding-question-validator/
 - **Node.js** (v18+) - Runtime
 - **TypeScript** (v5.3.3) - Type safety
 - **MongoDB** (v6.3.0) - Database
-- **Redis** (via IORedis v5.3.2) - Queue backend
-- **BullMQ** (v5.1.0) - Job queue
+- **AWS SQS** (via @aws-sdk/client-sqs v3.654.0) - Message queue
+- **OpenAI** (v4.63.0) - AI processing
 - **Zod** (v3.22.4) - Schema validation
 - **Winston** (v3.11.0) - Logging
-- **Anthropic SDK** (v0.20.0) - Claude API
 
 ### Development Tools
 - **ts-node** - TypeScript execution
@@ -265,7 +267,8 @@ npm run consumer # Process queue
 **Required**:
 ```env
 MONGODB_URI=mongodb://localhost:27017/recruitment?replicaSet=rs0
-ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxx
+OPENAI_API_KEY=sk-proj-xxxxxxxxxxxxx
+SQS_QUEUE_URL=https://localhost.localstack.cloud:4566/000000000000/coding_question_updater_queue
 ```
 
 **Optional (with defaults)**:
@@ -286,8 +289,10 @@ tail -f logs/combined.log
 
 ### Check Queue
 ```bash
-redis-cli LLEN bull:question-validation-queue:waiting
-redis-cli LLEN bull:question-validation-queue:active
+aws sqs get-queue-attributes \
+  --queue-url $SQS_QUEUE_URL \
+  --attribute-names ApproximateNumberOfMessages,ApproximateNumberOfMessagesNotVisible \
+  --region ap-south-1
 ```
 
 ### View Backups
@@ -387,14 +392,17 @@ mongosh --eval "rs.status()"
 
 **Redis Connection**:
 ```bash
-# Check Redis is running
-redis-cli ping  # Should return "PONG"
+# Check LocalStack is running
+docker ps | grep localstack
+
+# Or check AWS SQS connectivity
+aws sqs list-queues --region ap-south-1
 ```
 
 **API Key**:
 - Verify key in `.env`
 - Check for extra spaces
-- Ensure key starts with `sk-ant-`
+- Ensure key starts with `sk-proj-` (OpenAI)
 
 **No Documents Queued**:
 - Check if documents are valid

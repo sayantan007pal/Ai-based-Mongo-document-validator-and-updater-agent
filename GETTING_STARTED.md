@@ -13,7 +13,8 @@ npm install
 cp .env.example .env
 # Edit .env and set:
 # - MONGODB_URI (your MongoDB connection string)
-# - ANTHROPIC_API_KEY (your Claude API key)
+# - OPENAI_API_KEY (your OpenAI API key)
+# - SQS_QUEUE_URL (your SQS queue URL or LocalStack URL)
 ```
 
 ### 3. Build
@@ -73,14 +74,16 @@ mongosh --eval "rs.initiate()"
 
 ### "Redis connection refused"
 ```bash
-# Start Redis
-redis-server
+# Start LocalStack for SQS
+docker run -d -p 4566:4566 localstack/localstack
+
+# Or configure real AWS SQS in .env
 ```
 
 ### "Invalid API key"
 - Check `.env` file has correct API key
 - Ensure no extra spaces or quotes
-- Key should start with `sk-ant-`
+- Key should start with `sk-proj-` (OpenAI)
 
 ## Directory Structure
 

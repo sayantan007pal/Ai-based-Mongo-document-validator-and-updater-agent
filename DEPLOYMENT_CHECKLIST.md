@@ -16,9 +16,13 @@ Use this checklist to ensure proper deployment of the Coding Question Validator 
   mongosh --eval "rs.status()"
   ```
 
-- [ ] Redis server running
+- [ ] AWS SQS queue created (or LocalStack running)
   ```bash
-  redis-cli ping  # Should return "PONG"
+  # For LocalStack
+  docker ps | grep localstack
+  
+  # For AWS
+  aws sqs list-queues --region ap-south-1
   ```
 
 - [ ] Sufficient disk space for backups
@@ -40,7 +44,7 @@ Use this checklist to ensure proper deployment of the Coding Question Validator 
 
 - [ ] Anthropic API key added (no quotes)
   ```env
-  ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxx
+  OPENAI_API_KEY=sk-proj-xxxxxxxxxxxxx
   ```
 
 - [ ] Database and collection names verified
@@ -49,10 +53,11 @@ Use this checklist to ensure proper deployment of the Coding Question Validator 
   MONGODB_COLLECTION=coding_questions
   ```
 
-- [ ] Redis connection settings correct
+- [ ] SQS queue settings correct
   ```env
-  REDIS_HOST=localhost
-  REDIS_PORT=6379
+  SQS_QUEUE_URL=https://localhost.localstack.cloud:4566/000000000000/coding_question_updater_queue
+  SQS_REGION=ap-south-1
+  SQS_ENDPOINT=https://localhost.localstack.cloud:4566  # Optional, for LocalStack
   ```
 
 - [ ] Performance settings tuned
@@ -102,7 +107,11 @@ Use this checklist to ensure proper deployment of the Coding Question Validator 
 
 - [ ] Redis connection successful
   ```bash
-  redis-cli -h $REDIS_HOST -p $REDIS_PORT ping
+  # For LocalStack
+  docker ps | grep localstack
+  
+  # For AWS SQS
+  aws sqs get-queue-attributes --queue-url $SQS_QUEUE_URL --region ap-south-1
   ```
 
 - [ ] AI API connection successful
@@ -130,7 +139,10 @@ Use this checklist to ensure proper deployment of the Coding Question Validator 
 
 - [ ] Verify queue has jobs
   ```bash
-  redis-cli LLEN bull:question-validation-queue:waiting
+  aws sqs get-queue-attributes \
+    --queue-url $SQS_QUEUE_URL \
+    --attribute-names ApproximateNumberOfMessages \
+    --region ap-south-1
   ```
 
 - [ ] Run consumer and process 1-2 jobs
@@ -210,10 +222,10 @@ Use this checklist to ensure proper deployment of the Coding Question Validator 
 
 - [ ] Check queue statistics
   ```bash
-  redis-cli LLEN bull:question-validation-queue:waiting
-  redis-cli LLEN bull:question-validation-queue:active
-  redis-cli LLEN bull:question-validation-queue:completed
-  redis-cli LLEN bull:question-validation-queue:failed
+  aws sqs get-queue-attributes \
+    --queue-url $SQS_QUEUE_URL \
+    --attribute-names All \
+    --region ap-south-1
   ```
 
 - [ ] Monitor error logs
@@ -260,7 +272,11 @@ Use this checklist to ensure proper deployment of the Coding Question Validator 
 
 - [ ] Monitor Redis memory
   ```bash
-  redis-cli INFO memory
+  # Check SQS queue size
+  aws sqs get-queue-attributes \
+    --queue-url $SQS_QUEUE_URL \
+    --attribute-names ApproximateNumberOfMessages \
+    --region ap-south-1
   ```
 
 - [ ] Check MongoDB connections
@@ -278,7 +294,11 @@ Use this checklist to ensure proper deployment of the Coding Question Validator 
 
 - [ ] Check failed jobs
   ```bash
-  redis-cli LLEN bull:question-validation-queue:failed
+  # Check approximate number of messages not visible (in-flight or failed)
+  aws sqs get-queue-attributes \
+    --queue-url $SQS_QUEUE_URL \
+    --attribute-names ApproximateNumberOfMessagesNotVisible \
+    --region ap-south-1
   ```
 
 - [ ] Review error patterns
@@ -321,7 +341,9 @@ Use this checklist to ensure proper deployment of the Coding Question Validator 
 
 - [ ] Clean completed jobs
   ```bash
-  # Via BullMQ admin UI or programmatically
+  # SQS automatically removes successfully processed messages
+  # For stuck messages, purge queue (careful!)
+  aws sqs purge-queue --queue-url $SQS_QUEUE_URL --region ap-south-1
   ```
 
 - [ ] Review backup storage
@@ -339,7 +361,7 @@ Use this checklist to ensure proper deployment of the Coding Question Validator 
 
 - [ ] Rotate API keys (if required)
   ```bash
-  # Update ANTHROPIC_API_KEY in .env
+  # Update OPENAI_API_KEY in .env
   # Restart consumer
   pm2 restart validator-consumer
   ```
@@ -375,8 +397,8 @@ If issues occur:
 
 - [ ] Clear queue (if needed)
   ```bash
-  redis-cli FLUSHDB  # WARNING: Clears all Redis data
-  # OR selectively remove jobs
+  # Purge SQS queue (removes all messages)
+  aws sqs purge-queue --queue-url $SQS_QUEUE_URL --region ap-south-1
   ```
 
 - [ ] Restore from MongoDB backup
@@ -406,7 +428,8 @@ If issues occur:
 
 - [ ] Check Redis connection
   ```bash
-  redis-cli ping
+  # Check SQS connectivity
+  aws sqs list-queues --region ap-south-1
   ```
 
 - [ ] Check MongoDB connection
@@ -421,7 +444,10 @@ If issues occur:
 
 - [ ] Check queue has jobs
   ```bash
-  redis-cli LLEN bull:question-validation-queue:waiting
+  aws sqs get-queue-attributes \
+    --queue-url $SQS_QUEUE_URL \
+    --attribute-names ApproximateNumberOfMessages \
+    --region ap-south-1
   ```
 
 ### High Error Rate

@@ -1,6 +1,6 @@
 # Coding Question Validator
 
-A production-ready MongoDB schema validation and auto-correction system for coding questions. This system scans documents, validates them against a strict schema, backs up invalid documents, and uses AI (Claude) to automatically correct and update them.
+A production-ready MongoDB schema validation and auto-correction system for coding questions. This system scans documents, validates them against a strict schema, backs up invalid documents, and uses AI (OpenAI GPT) to automatically correct and update them.
 
 ## Table of Contents
 
@@ -26,8 +26,8 @@ This system provides automated validation and correction of coding question docu
 1. **Scans** MongoDB documents in batches
 2. **Validates** against a strict TypeScript schema using Zod
 3. **Backs up** invalid documents to JSON files
-4. **Queues** invalid documents using BullMQ (Redis-backed)
-5. **Processes** documents with Claude AI for intelligent correction
+4. **Queues** invalid documents using AWS SQS
+5. **Processes** documents with OpenAI GPT for intelligent correction
 6. **Updates** existing documents (NEVER creates new ones)
 7. **Handles** errors gracefully with exponential backoff retry
 
@@ -37,8 +37,8 @@ This system provides automated validation and correction of coding question docu
 
 - ✅ Strict schema validation with 10+ validation rules
 - ✅ Automatic backup before any modifications
-- ✅ AI-powered document correction using Claude API
-- ✅ Queue-based processing with retry mechanism
+- ✅ AI-powered document correction using OpenAI GPT API
+- ✅ Queue-based processing with AWS SQS
 - ✅ Batch processing for efficiency
 - ✅ Comprehensive logging with Winston
 - ✅ Zero data loss - never creates duplicate documents
@@ -65,22 +65,23 @@ This system provides automated validation and correction of coding question docu
 │  - Fetches documents in batches                                 │
 │  - Validates against schema                                     │
 │  - Backs up invalid documents                                   │
-│  - Publishes to queue                                           │
+│  - Publishes to SQS queue                                       │
 └────────────────┬────────────────────────────────────────────────┘
                  │
                  ▼
 ┌─────────────────────────────────────────────────────────────────┐
-│                    BULLMQ QUEUE (Redis)                          │
+│                      AWS SQS QUEUE                               │
 │  - Manages job queue                                            │
-│  - Handles retries with exponential backoff                     │
-│  - Tracks job states (waiting, active, completed, failed)       │
+│  - Handles retries with configurable backoff                    │
+│  - Tracks message states (in-flight, processed, failed)         │
+│  - Supports long polling for efficiency                         │
 └────────────────┬────────────────────────────────────────────────┘
                  │
                  ▼
 ┌─────────────────────────────────────────────────────────────────┐
 │                        CONSUMER CLI                              │
-│  - Processes jobs from queue                                    │
-│  - Calls AI for correction                                      │
+│  - Polls messages from SQS                                      │
+│  - Calls OpenAI for correction                                  │
 │  - Validates AI response                                        │
 │  - Updates MongoDB (ONLY existing docs)                         │
 └─────────────────────────────────────────────────────────────────┘
@@ -88,7 +89,7 @@ This system provides automated validation and correction of coding question docu
 ┌─────────────────────────────────────────────────────────────────┐
 │                      DATA FLOW DIAGRAM                           │
 │                                                                  │
-│  MongoDB → Scanner → Validator → BackupManager → Queue          │
+│  MongoDB → Scanner → Validator → BackupManager → SQS Queue      │
 │                                      │                           │
 │                                      ▼                           │
 │                                   Consumer                       │
@@ -96,6 +97,7 @@ This system provides automated validation and correction of coding question docu
 │                   ┌──────────────────┴──────────────────┐       │
 │                   ▼                                      ▼       │
 │              AI Processor                          Validator     │
+│              (OpenAI GPT)                                │       │
 │                   │                                      │       │
 │                   └──────────────────┬──────────────────┘       │
 │                                      ▼                           │
@@ -117,10 +119,14 @@ This system provides automated validation and correction of coding question docu
    mongodb://localhost:27017,localhost:27018,localhost:27019/recruitment?replicaSet=rs0
    ```
 
-2. **Redis Server** (for BullMQ queue)
+2. **AWS SQS or LocalStack** (for queue management)
    ```bash
-   # Default: localhost:6379
-   redis-server
+   # For LocalStack development:
+   docker run -d -p 4566:4566 localstack/localstack
+   
+   # Create queue:
+   aws --endpoint-url=https://localhost.localstack.cloud:4566 sqs create-queue \
+     --queue-name coding_question_updater_queue --region ap-south-1
    ```
 
 3. **Node.js** (v18 or higher)
@@ -128,9 +134,9 @@ This system provides automated validation and correction of coding question docu
    node --version  # Should be >= 18
    ```
 
-4. **Anthropic API Key**
-   - Sign up at https://console.anthropic.com/
-   - Generate API key
+4. **OpenAI API Key**
+   - Sign up at https://platform.openai.com/
+   - Generate API key from API keys section
 
 ### System Requirements
 
@@ -175,16 +181,16 @@ MONGODB_URI=mongodb://localhost:27017,localhost:27018,localhost:27019/recruitmen
 MONGODB_DATABASE=recruitment
 MONGODB_COLLECTION=coding_questions
 
-# Redis/Queue Configuration
-REDIS_HOST=localhost
-REDIS_PORT=6379
-QUEUE_NAME=question-validation-queue
+# AWS SQS Configuration
+SQS_QUEUE_URL=https://localhost.localstack.cloud:4566/000000000000/coding_question_updater_queue
+SQS_REGION=ap-south-1
+SQS_ENDPOINT=https://localhost.localstack.cloud:4566  # Optional, for LocalStack only
 QUEUE_CONCURRENCY=5
 
-# AI Configuration
-AI_PROVIDER=anthropic
-ANTHROPIC_API_KEY=sk-ant-xxxxxxxxxxxxx  # Your actual API key
-AI_MODEL=claude-3-5-sonnet-20241022
+# AI Configuration (OpenAI)
+AI_PROVIDER=openai
+OPENAI_API_KEY=sk-proj-xxxxxxxxxxxxx  # Your actual API key
+AI_MODEL=gpt-4-turbo-preview
 AI_MAX_TOKENS=4000
 AI_TEMPERATURE=0.1
 
@@ -457,14 +463,16 @@ Structure:
 - Verify connection string in `.env`
 - Check network/firewall settings
 
-#### 2. Redis Connection Failed
+### Issue: AWS SQS Connection Failed
 
-**Error:** `ECONNREFUSED 127.0.0.1:6379`
+**Error:** `Unable to connect to SQS`
 
 **Solutions:**
-- Start Redis: `redis-server`
-- Verify Redis is running: `redis-cli ping` (should return "PONG")
-- Check Redis port in `.env`
+- Verify SQS queue exists
+- Check AWS credentials (if using real AWS)
+- For LocalStack: Ensure LocalStack is running: `docker ps | grep localstack`
+- Check queue URL in `.env`
+- Verify region settings
 
 #### 3. AI API Key Invalid
 
@@ -472,8 +480,9 @@ Structure:
 
 **Solutions:**
 - Verify API key in `.env` is correct
-- Check API key has not expired
+- Check API key has not expired or reached quota
 - Ensure no extra spaces in `.env` file
+- Key should start with `sk-proj-` for OpenAI
 
 #### 4. Document Not Found Error
 
@@ -634,10 +643,10 @@ QUEUE_CONCURRENCY=10  # Process 10 jobs simultaneously
 
 ### API Rate Limits
 
-Claude API has rate limits. If hitting limits:
+OpenAI API has rate limits. If hitting limits:
 - Decrease `QUEUE_CONCURRENCY`
 - Add delays between jobs
-- Upgrade API tier
+- Upgrade API tier or check usage limits
 
 ## License
 
@@ -653,10 +662,11 @@ For issues or questions:
 
 ## Changelog
 
-### v1.0.0 (2024-01-15)
-- Initial release
+### v1.0.0 (Current)
+- AWS SQS queue integration
+- OpenAI GPT-4 integration
 - MongoDB validation and correction
 - AI-powered document fixing
-- Queue-based processing
+- Batch processing with concurrency control
 - Comprehensive logging
 - Backup system
