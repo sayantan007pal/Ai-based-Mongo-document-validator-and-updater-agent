@@ -1,6 +1,5 @@
 #!/usr/bin/env node
 
-import { Job } from 'bullmq';
 import { loadConfig, validateConfig } from './config';
 import { Logger } from './utils/Logger';
 import { MongoDBService } from './services/MongoDBService';
@@ -74,16 +73,14 @@ async function main() {
       concurrency: config.queue.concurrency,
     });
 
-    const worker = queueService.createWorker(async (job: Job<QueueMessage>) => {
+    queueService.createWorker(async (message: QueueMessage) => {
       const startTime = Date.now();
-      const { documentId, failedDocument, validationErrors, retryCount } = job.data;
+      const { documentId, failedDocument, validationErrors, retryCount } = message;
 
-      logger.info('Processing job', {
-        jobId: job.id,
+      logger.info('Processing message', {
         documentId,
         questionId: failedDocument.question_id,
         errorCount: validationErrors.length,
-        attemptsMade: job.attemptsMade,
         retryCount,
       });
 
@@ -127,8 +124,7 @@ async function main() {
         successCount++;
         processedCount++;
 
-        logger.info('Job completed successfully', {
-          jobId: job.id,
+        logger.info('Message processed successfully', {
           documentId,
           questionId: correctedDocument.question_id,
           durationMs: duration,
@@ -139,21 +135,20 @@ async function main() {
         failureCount++;
         processedCount++;
 
-        logger.error('Job processing failed', {
-          jobId: job.id,
+        logger.error('Message processing failed', {
           documentId,
-          attemptsMade: job.attemptsMade,
           error: (error as Error).message,
           stack: (error as Error).stack,
         });
 
-        // Re-throw to let BullMQ handle retry
+        // Re-throw to let SQS handle retry
         throw error;
       }
     });
 
     // Log statistics periodically
-    const statsInterval = setInterval(async () => {
+    setInterval(async () => {
+      if (!queueService) return;
       const stats = await queueService.getStats();
       logger.info('Worker statistics', {
         processed: processedCount,

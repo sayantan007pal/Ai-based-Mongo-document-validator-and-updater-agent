@@ -89,13 +89,34 @@ export class MongoDBService {
     try {
       const cursor = collection.find({});
       let batch: Document[] = [];
+      let skippedCount = 0;
 
-      for await (const doc of cursor) {
-        batch.push(doc);
+      // We need to iterate manually to handle UTF-8 errors
+      while (await cursor.hasNext()) {
+        try {
+          const doc = await cursor.next();
+          if (doc) {
+            batch.push(doc);
 
-        if (batch.length >= batchSize) {
-          yield batch;
-          batch = [];
+            if (batch.length >= batchSize) {
+              yield batch;
+              batch = [];
+            }
+          }
+        } catch (docError: any) {
+          // Handle invalid UTF-8 or other BSON errors for individual documents
+          if (docError.message?.includes('Invalid UTF-8') || docError.name === 'BSONError') {
+            skippedCount++;
+            logger.warn('Skipping document with BSON/UTF-8 error', {
+              error: docError.message,
+              skippedCount,
+            });
+            // Continue to next document
+            continue;
+          } else {
+            // Re-throw other errors
+            throw docError;
+          }
         }
       }
 
@@ -104,7 +125,9 @@ export class MongoDBService {
         yield batch;
       }
 
-      logger.info('Completed fetching all documents');
+      logger.info('Completed fetching all documents', {
+        skippedCorruptedDocs: skippedCount,
+      });
     } catch (error) {
       logger.error('Error fetching documents', {
         error: (error as Error).message,

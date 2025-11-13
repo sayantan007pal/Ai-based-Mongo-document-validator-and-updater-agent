@@ -12,13 +12,14 @@ export function generateCorrectionPrompt(
 
 ## CRITICAL REQUIREMENTS:
 1. Return ONLY valid JSON - no markdown, no explanations, no code blocks
-2. PRESERVE the _id field exactly as provided
-3. PRESERVE the question_id field exactly as provided
-4. Fix ALL validation errors listed below
-5. Ensure test cases use stdin/stdout format (NOT variable assignment format)
-6. All 5 programming languages (c, cpp, java, javascript, python) must have non-empty code
-7. difficulty must be EXACTLY one of: "Easy", "Medium", or "Hard"
-8. slug must be lowercase-with-hyphens
+2. PRESERVE the _id field EXACTLY as provided: "${document._id}"
+3. PRESERVE the question_id field EXACTLY as provided: "${document.question_id || document._id}"
+4. NEVER remove or modify _id or question_id fields
+5. Fix ALL validation errors listed below
+6. Ensure test cases use stdin/stdout format (NOT variable assignment format)
+7. All 5 programming languages (c, cpp, java, javascript, python) must have non-empty code
+8. difficulty must be EXACTLY one of: "Easy", "Medium", or "Hard"
+9. slug must be lowercase-with-hyphens
 
 ## VALIDATION ERRORS TO FIX:
 ${validationErrors.map((err, idx) => `${idx + 1}. Field: "${err.field}" - ${err.message}`).join('\n')}
@@ -72,6 +73,11 @@ ${JSON.stringify(document, null, 2)}
 
 ## YOUR TASK:
 Fix all validation errors in the document above. Return the corrected document as pure JSON (no markdown, no explanations).
+
+CRITICAL REMINDER:
+- Your response MUST include "_id": "${document._id}"
+- Your response MUST include "question_id": "${document.question_id || document._id}"
+- Do NOT omit these fields under any circumstances
 
 RESPOND WITH ONLY THE CORRECTED JSON DOCUMENT:`;
 }

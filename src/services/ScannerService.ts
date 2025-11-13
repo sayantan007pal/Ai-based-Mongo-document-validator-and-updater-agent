@@ -16,6 +16,7 @@ interface ScanStats {
   backedUp: number;
   queued: number;
   errors: number;
+  skippedCorrupted: number;
   startTime: Date;
   endTime?: Date;
 }
@@ -54,6 +55,7 @@ export class ScannerService {
       backedUp: 0,
       queued: 0,
       errors: 0,
+      skippedCorrupted: 0,
       startTime: new Date(),
     };
 
@@ -204,6 +206,7 @@ export class ScannerService {
       backedUp: stats.backedUp,
       queued: stats.queued,
       errors: stats.errors,
+      skippedCorrupted: stats.skippedCorrupted,
       durationSeconds: duration.toFixed(2),
       docsPerSecond: (stats.totalScanned / duration).toFixed(2),
     });

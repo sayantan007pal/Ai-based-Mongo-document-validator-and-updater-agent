@@ -62,6 +62,7 @@ async function main() {
     // Run scan
     logger.info('Starting scan...');
     const stats = await scannerService.scanAndQueue();
+    logger.info('Scan statistics', stats);
 
     // Get queue stats after scan
     const queueStatsAfter = await queueService.getStats();

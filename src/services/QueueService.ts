@@ -1,87 +1,89 @@
-import { Queue, Worker, Job, QueueEvents } from 'bullmq';
-import IORedis from 'ioredis';
+import {
+  SQSClient,
+  SendMessageCommand,
+  ReceiveMessageCommand,
+  DeleteMessageCommand,
+  GetQueueAttributesCommand,
+  ChangeMessageVisibilityCommand,
+  Message,
+} from '@aws-sdk/client-sqs';
 import { QueueConfig } from '../config/queue.config';
-import { QueueMessage, QueueJobOptions, QueueStats } from '../models/QueueMessage';
+import { QueueMessage, QueueStats } from '../models/QueueMessage';
 import { logger } from '../utils/Logger';
 
 /**
- * Queue Service using BullMQ
+ * Queue Service using AWS SQS
  */
 export class QueueService {
-  private queue: Queue<QueueMessage>;
-  private queueEvents: QueueEvents;
-  private redisConnection: IORedis;
+  private client: SQSClient;
   private config: QueueConfig;
+  private isPolling: boolean = false;
+  private pollingInterval?: NodeJS.Timeout;
+  private messageHandlers: Map<string, (message: QueueMessage) => Promise<void>> = new Map();
 
   constructor(config: QueueConfig) {
     this.config = config;
 
-    // Create Redis connection
-    this.redisConnection = new IORedis({
-      host: config.redis.host,
-      port: config.redis.port,
-      maxRetriesPerRequest: null,
-    });
+    // Create SQS client
+    const clientConfig: any = {
+      region: config.region,
+    };
 
-    // Create queue
-    this.queue = new Queue<QueueMessage>(config.queueName, {
-      connection: this.redisConnection,
-      defaultJobOptions: {
-        attempts: config.retryMaxAttempts,
-        backoff: {
-          type: 'exponential',
-          delay: config.retryDelayMs,
-        },
-        removeOnComplete: 1000, // Keep last 1000 completed jobs
-        removeOnFail: 5000, // Keep last 5000 failed jobs
-      },
-    });
+    // Add endpoint for LocalStack
+    if (config.endpoint) {
+      clientConfig.endpoint = config.endpoint;
+      // For LocalStack, we need to set credentials
+      clientConfig.credentials = {
+        accessKeyId: 'test',
+        secretAccessKey: 'test',
+      };
+    }
 
-    // Create queue events listener
-    this.queueEvents = new QueueEvents(config.queueName, {
-      connection: this.redisConnection.duplicate(),
-    });
+    this.client = new SQSClient(clientConfig);
 
-    this.setupEventListeners();
-  }
-
-  /**
-   * Setup event listeners
-   */
-  private setupEventListeners(): void {
-    this.queueEvents.on('completed', ({ jobId }) => {
-      logger.debug('Job completed', { jobId });
-    });
-
-    this.queueEvents.on('failed', ({ jobId, failedReason }) => {
-      logger.error('Job failed', { jobId, failedReason });
-    });
-
-    this.queueEvents.on('progress', ({ jobId, data }) => {
-      logger.debug('Job progress', { jobId, progress: data });
+    logger.info('SQS Queue service initialized', {
+      queueUrl: config.queueUrl,
+      region: config.region,
+      endpoint: config.endpoint,
     });
   }
 
   /**
    * Add job to queue
    */
-  async addJob(message: QueueMessage, options?: QueueJobOptions): Promise<string> {
+  async addJob(message: QueueMessage, options?: { delaySeconds?: number }): Promise<string> {
     try {
-      const job = await this.queue.add(
-        `validate-${message.documentId}`,
-        message,
-        options
-      );
+      const command = new SendMessageCommand({
+        QueueUrl: this.config.queueUrl,
+        MessageBody: JSON.stringify(message),
+        DelaySeconds: options?.delaySeconds || 0,
+        MessageAttributes: {
+          documentId: {
+            DataType: 'String',
+            StringValue: message.documentId,
+          },
+          questionId: {
+            DataType: 'String',
+            StringValue: message.failedDocument.question_id || 'unknown',
+          },
+          attemptNumber: {
+            DataType: 'Number',
+            StringValue: '0',
+          },
+        },
+      });
 
-      logger.info('Job added to queue', {
-        jobId: job.id,
+      const response = await this.client.send(command);
+
+      logger.info('Message sent to SQS', {
+        messageId: response.MessageId,
         documentId: message.documentId,
         questionId: message.failedDocument.question_id,
       });
 
-      return job.id || 'unknown';
+      return response.MessageId || 'unknown';
     } catch (error) {
-      logger.error('Failed to add job to queue', {
+      logger.error('Failed to send message to SQS', {
         documentId: message.documentId,
         error: (error as Error).message,
       });
@@ -91,46 +93,214 @@ export class QueueService {
 
   /**
    * Create worker to process jobs
+   * For SQS, this starts a polling loop
    */
-  createWorker(
-    processor: (job: Job<QueueMessage>) => Promise<void>
-  ): Worker<QueueMessage> {
-    const worker = new Worker<QueueMessage>(
-      this.config.queueName,
-      processor,
-      {
-        connection: this.redisConnection.duplicate(),
-        concurrency: this.config.concurrency,
-      }
-    );
+  createWorker(processor: (message: QueueMessage) => Promise<void>): void {
+    const workerId = Date.now().toString();
+    this.messageHandlers.set(workerId, processor);
 
-    // Worker event listeners
-    worker.on('completed', (job) => {
-      logger.info('Worker completed job', {
-        jobId: job.id,
-        documentId: job.data.documentId,
-      });
-    });
-
-    worker.on('failed', (job, err) => {
-      logger.error('Worker failed job', {
-        jobId: job?.id,
-        documentId: job?.data.documentId,
-        error: err.message,
-        attemptsMade: job?.attemptsMade,
-      });
-    });
-
-    worker.on('error', (err) => {
-      logger.error('Worker error', { error: err.message });
-    });
+    if (!this.isPolling) {
+      this.startPolling();
+    }
 
     logger.info('Worker created', {
-      queueName: this.config.queueName,
+      workerId,
       concurrency: this.config.concurrency,
     });
+  }
 
-    return worker;
+  /**
+   * Start polling for messages
+   */
+  private async startPolling(): Promise<void> {
+    if (this.isPolling) {
+      logger.warn('Polling already started');
+      return;
+    }
+
+    this.isPolling = true;
+    logger.info('Starting SQS polling');
+
+    // Poll continuously
+    this.pollMessages();
+  }
+
+  /**
+   * Poll for messages from SQS
+   */
+  private async pollMessages(): Promise<void> {
+    if (!this.isPolling) {
+      return;
+    }
+
+    try {
+      const command = new ReceiveMessageCommand({
+        QueueUrl: this.config.queueUrl,
+        MaxNumberOfMessages: this.config.maxNumberOfMessages,
+        WaitTimeSeconds: this.config.waitTimeSeconds,
+        VisibilityTimeout: this.config.visibilityTimeout,
+        MessageAttributeNames: ['All'],
+        AttributeNames: ['All'],
+      });
+
+      const response = await this.client.send(command);
+
+      if (response.Messages && response.Messages.length > 0) {
+        logger.debug('Received messages from SQS', {
+          count: response.Messages.length,
+        });
+
+        // Process messages concurrently (up to concurrency limit)
+        const processingPromises = response.Messages.map((message) =>
+          this.processMessage(message)
+        );
+
+        await Promise.allSettled(processingPromises);
+      }
+    } catch (error) {
+      logger.error('Error polling messages from SQS', {
+        error: (error as Error).message,
+      });
+    }
+
+    // Continue polling
+    if (this.isPolling) {
+      setImmediate(() => this.pollMessages());
+    }
+  }
+
+  /**
+   * Process a single message
+   */
+  private async processMessage(sqsMessage: Message): Promise<void> {
+    if (!sqsMessage.Body || !sqsMessage.ReceiptHandle) {
+      logger.warn('Received message without body or receipt handle');
+      return;
+    }
+
+    let queueMessage: QueueMessage;
+    const receiptHandle = sqsMessage.ReceiptHandle;
+
+    try {
+      queueMessage = JSON.parse(sqsMessage.Body);
+    } catch (error) {
+      logger.error('Failed to parse message body', {
+        error: (error as Error).message,
+        messageId: sqsMessage.MessageId,
+      });
+      // Delete invalid message
+      await this.deleteMessage(receiptHandle);
+      return;
+    }
+
+    const attemptNumber = parseInt(
+      sqsMessage.Attributes?.ApproximateReceiveCount || '1',
+      10
+    );
+
+    logger.info('Processing message', {
+      messageId: sqsMessage.MessageId,
+      documentId: queueMessage.documentId,
+      attemptNumber,
+    });
+
+    try {
+      // Call all registered message handlers
+      for (const [workerId, handler] of this.messageHandlers) {
+        try {
+          await handler(queueMessage);
+        } catch (error) {
+          logger.error('Message handler failed', {
+            workerId,
+            messageId: sqsMessage.MessageId,
+            documentId: queueMessage.documentId,
+            error: (error as Error).message,
+          });
+          throw error; // Rethrow to trigger retry logic
+        }
+      }
+
+      // Delete message on success
+      await this.deleteMessage(receiptHandle);
+
+      logger.info('Message processed successfully', {
+        messageId: sqsMessage.MessageId,
+        documentId: queueMessage.documentId,
+      });
+    } catch (error) {
+      logger.error('Failed to process message', {
+        messageId: sqsMessage.MessageId,
+        documentId: queueMessage.documentId,
+        attemptNumber,
+        error: (error as Error).message,
+      });
+
+      // Check if we've exceeded max attempts
+      if (attemptNumber >= this.config.retryMaxAttempts) {
+        logger.error('Max retry attempts reached, deleting message', {
+          messageId: sqsMessage.MessageId,
+          documentId: queueMessage.documentId,
+          attempts: attemptNumber,
+        });
+        await this.deleteMessage(receiptHandle);
+      } else {
+        // Change visibility timeout to implement exponential backoff
+        const backoffDelay = Math.min(
+          this.config.retryDelayMs * Math.pow(2, attemptNumber - 1) / 1000,
+          this.config.visibilityTimeout
+        );
+
+        logger.info('Retrying message with backoff', {
+          messageId: sqsMessage.MessageId,
+          documentId: queueMessage.documentId,
+          attemptNumber,
+          backoffSeconds: backoffDelay,
+        });
+
+        await this.changeMessageVisibility(receiptHandle, Math.floor(backoffDelay));
+      }
+    }
+  }
+
+  /**
+   * Delete message from queue
+   */
+  private async deleteMessage(receiptHandle: string): Promise<void> {
+    try {
+      const command = new DeleteMessageCommand({
+        QueueUrl: this.config.queueUrl,
+        ReceiptHandle: receiptHandle,
+      });
+
+      await this.client.send(command);
+    } catch (error) {
+      logger.error('Failed to delete message', {
+        error: (error as Error).message,
+      });
+      throw error;
+    }
+  }
+
+  /**
+   * Change message visibility timeout
+   */
+  private async changeMessageVisibility(
+    receiptHandle: string,
+    visibilityTimeout: number
+  ): Promise<void> {
+    try {
+      const command = new ChangeMessageVisibilityCommand({
+        QueueUrl: this.config.queueUrl,
+        ReceiptHandle: receiptHandle,
+        VisibilityTimeout: visibilityTimeout,
+      });
+
+      await this.client.send(command);
+    } catch (error) {
+      logger.error('Failed to change message visibility', {
+        error: (error as Error).message,
+      });
+    }
   }
 
   /**
@@ -138,20 +308,24 @@ export class QueueService {
    */
   async getStats(): Promise<QueueStats> {
     try {
-      const [waiting, active, completed, failed, delayed] = await Promise.all([
-        this.queue.getWaitingCount(),
-        this.queue.getActiveCount(),
-        this.queue.getCompletedCount(),
-        this.queue.getFailedCount(),
-        this.queue.getDelayedCount(),
-      ]);
+      const command = new GetQueueAttributesCommand({
+        QueueUrl: this.config.queueUrl,
+        AttributeNames: [
+          'ApproximateNumberOfMessages',
+          'ApproximateNumberOfMessagesNotVisible',
+          'ApproximateNumberOfMessagesDelayed',
+        ],
+      });
+
+      const response = await this.client.send(command);
+      const attrs = response.Attributes || {};
 
       return {
-        waiting,
-        active,
-        completed,
-        failed,
-        delayed,
+        waiting: parseInt(attrs.ApproximateNumberOfMessages || '0', 10),
+        active: parseInt(attrs.ApproximateNumberOfMessagesNotVisible || '0', 10),
+        completed: 0, // SQS doesn't track completed messages
+        failed: 0, // SQS doesn't track failed messages directly
+        delayed: parseInt(attrs.ApproximateNumberOfMessagesDelayed || '0', 10),
       };
     } catch (error) {
       logger.error('Failed to get queue stats', {
@@ -162,44 +336,38 @@ export class QueueService {
   }
 
   /**
-   * Get job by ID
+   * Pause queue processing
    */
-  async getJob(jobId: string): Promise<Job<QueueMessage> | undefined> {
-    try {
-      return await this.queue.getJob(jobId);
-    } catch (error) {
-      logger.error('Failed to get job', {
-        jobId,
-        error: (error as Error).message,
-      });
-      throw error;
+  async pause(): Promise<void> {
+    this.isPolling = false;
+    if (this.pollingInterval) {
+      clearInterval(this.pollingInterval);
+      this.pollingInterval = undefined;
+    }
+    logger.info('Queue polling paused');
+  }
+
+  /**
+   * Resume queue processing
+   */
+  async resume(): Promise<void> {
+    if (!this.isPolling) {
+      this.startPolling();
+      logger.info('Queue polling resumed');
     }
   }
 
   /**
-   * Pause queue
-   */
-  async pause(): Promise<void> {
-    await this.queue.pause();
-    logger.info('Queue paused');
-  }
-
-  /**
-   * Resume queue
-   */
-  async resume(): Promise<void> {
-    await this.queue.resume();
-    logger.info('Queue resumed');
-  }
-
-  /**
-   * Close queue and connections
+   * Close queue service
    */
   async close(): Promise<void> {
     try {
-      await this.queue.close();
-      await this.queueEvents.close();
-      await this.redisConnection.quit();
+      this.isPolling = false;
+      if (this.pollingInterval) {
+        clearInterval(this.pollingInterval);
+      }
+      this.messageHandlers.clear();
+      this.client.destroy();
       logger.info('Queue service closed');
     } catch (error) {
       logger.error('Error closing queue service', {
@@ -210,12 +378,19 @@ export class QueueService {
   }
 
   /**
-   * Clean old jobs
+   * Clean old jobs (no-op for SQS, as it has built-in message retention)
    */
   async clean(grace: number = 86400000): Promise<void> {
-    // Clean jobs older than grace period (default 24 hours)
-    await this.queue.clean(grace, 1000, 'completed');
-    await this.queue.clean(grace, 1000, 'failed');
-    logger.info('Queue cleaned', { gracePeriodMs: grace });
+    logger.info('Clean operation not needed for SQS (automatic retention)', {
+      gracePeriodMs: grace,
+    });
+  }
+
+  /**
+   * Get job by ID (not supported in SQS)
+   */
+  async getJob(jobId: string): Promise<any> {
+    logger.warn('getJob not supported in SQS', { jobId });
+    return undefined;
   }
 }
