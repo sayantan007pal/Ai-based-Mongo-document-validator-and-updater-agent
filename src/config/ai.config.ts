@@ -20,7 +20,7 @@ export function loadAIConfig(): AIConfig {
   return AIConfigSchema.parse({
     provider: process.env.AI_PROVIDER || 'openai',
     apiKey: process.env.OPENAI_API_KEY,
-    model: process.env.AI_MODEL || 'gpt-4-turbo-preview',
+    model: process.env.AI_MODEL || 'gpt-5.1-2025-11-13',
     maxTokens: parseInt(process.env.AI_MAX_TOKENS || '4000', 10),
     temperature: parseFloat(process.env.AI_TEMPERATURE || '0.1'),
   });

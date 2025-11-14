@@ -8,6 +8,7 @@
     "dev": "nodemon --exec ts-node src/index.ts",
     "scanner": "ts-node src/scanner.ts",
     "consumer": "ts-node src/consumer.ts",
+    "import": "ts-node src/importData.ts",
     "start:scanner": "node dist/scanner.js",
     "start:consumer": "node dist/consumer.js",
     "clean": "rm -rf dist"

@@ -15,6 +15,12 @@ import { logger } from '../utils/Logger';
  * Schema Validator for Coding Questions
  */
 export class SchemaValidator {
+  private skipCustomValidations: boolean;
+
+  constructor(options: { skipCustomValidations?: boolean } = {}) {
+    this.skipCustomValidations = options.skipCustomValidations || false;
+  }
+
   /**
    * Validate a coding question document
    */
@@ -32,8 +38,8 @@ export class SchemaValidator {
       const zodErrors = this.validateWithZod(document);
       errors.push(...zodErrors);
 
-      // If Zod validation passed, perform custom validations
-      if (zodErrors.length === 0) {
+      // If Zod validation passed, perform custom validations (unless skipped)
+      if (zodErrors.length === 0 && !this.skipCustomValidations) {
         const customErrors = this.performCustomValidations(document);
         errors.push(...customErrors);
       }
