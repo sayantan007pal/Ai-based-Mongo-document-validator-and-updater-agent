@@ -28,8 +28,8 @@ class DataImporter {
 
   constructor(missingJsonPath: string) {
     this.mongoService = new MongoDBService(loadMongoDBConfig());
-    // Skip custom validations for import - we just need schema compliance
-    this.validator = new SchemaValidator({ skipCustomValidations: true });
+    // Use standard validation
+    this.validator = new SchemaValidator();
     this.missingJsonPath = missingJsonPath;
   }
 

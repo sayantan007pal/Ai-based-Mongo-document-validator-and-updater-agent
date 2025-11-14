@@ -47,9 +47,11 @@ export { Logger, logger } from './utils/Logger';
 export { RetryHelper, RetryOptions } from './utils/RetryHelper';
 export { BackupManager } from './utils/BackupManager';
 export { FailureReportManager, FailureEntry } from './utils/FailureReportManager';
+export { DocumentNormalizer } from './utils/DocumentNormalizer';
 
 // Prompts
 export { generateCorrectionPrompt, parseAIResponse } from './prompts/correction-prompt';
+export { generateComprehensiveCorrectionPrompt, parseComprehensiveAIResponse } from './prompts/comprehensive-correction-prompt';
 
 /**
  * Version information

@@ -2,6 +2,7 @@ import { MongoDBService } from './MongoDBService';
 import { QueueService } from './QueueService';
 import { SchemaValidator } from '../validators/SchemaValidator';
 import { BackupManager } from '../utils/BackupManager';
+import { DocumentNormalizer } from '../utils/DocumentNormalizer';
 import { logger } from '../utils/Logger';
 import { QueueMessage } from '../models/QueueMessage';
 import { CodingQuestion } from '../models/CodingQuestion';
@@ -105,18 +106,31 @@ export class ScannerService {
       stats.totalScanned++;
 
       try {
-        // Validate document
-        const validationResult = this.validator.validate(doc);
+        // Step 1: Normalize document before validation
+        const normalized = DocumentNormalizer.normalize(doc);
+
+        // Validate normalization didn't break critical fields
+        if (!DocumentNormalizer.validateNormalization(doc, normalized)) {
+          logger.error('Normalization validation failed', {
+            documentId: doc._id?.toString(),
+          });
+          stats.errors++;
+          continue;
+        }
+
+        // Step 2: Validate normalized document
+        const validationResult = this.validator.validate(normalized);
 
         if (validationResult.isValid) {
           stats.validDocuments++;
           logger.debug('Document is valid', {
-            questionId: doc.question_id,
+            questionId: normalized.question_id,
             documentId: validationResult.documentId,
           });
         } else {
           stats.invalidDocuments++;
-          await this.handleInvalidDocument(doc, validationResult.errors, stats);
+          // Use normalized document for backup and queue
+          await this.handleInvalidDocument(normalized, validationResult.errors, stats);
         }
       } catch (error) {
         stats.errors++;

@@ -13,7 +13,7 @@ console.log(`Total documents in missing.json: ${rawData.length}\n`);
 const transformed = DataTransformer.transformAll(rawData);
 console.log(`Successfully transformed: ${transformed.length}\n`);
 
-const validator = new SchemaValidator({ skipCustomValidations: true });
+const validator = new SchemaValidator();
 let validCount = 0;
 let invalidCount = 0;
 
